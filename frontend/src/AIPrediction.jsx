@@ -8,22 +8,26 @@ export default function AIPrediction({ symbol, onUpdate, updateInterval = 60 }) 
       try {
         const res = await fetch(`http://localhost:5000/api/predict/${symbol}`);
         const data = await res.json();
-        if (data && data.prediction) {
+        
+        // 🟢 CORREÇÃO: Agora a tela atualiza o estado MESMO se a IA retornar um {error}
+        if (data) {
           setPrediction(data);
-          onUpdate(symbol, data.prediction, data.reasons);
+          // Só tenta repassar para o App.jsx se a previsão for válida e não um erro
+          if (data.prediction) {
+            onUpdate(symbol, data.prediction, data.reasons);
+          }
         }
       } catch (e) {
         console.error("Erro ao prever:", e);
       }
     };
 
-    fetchPrediction(); // Faz a primeira previsão imediatamente
+    fetchPrediction(); 
     
-    // 🟢 NOVO: O intervalo agora é dinâmico e controlado pelo painel! (Segundos * 1000)
     const interval = setInterval(fetchPrediction, updateInterval * 1000); 
     
     return () => clearInterval(interval);
-  }, [symbol, updateInterval]); // 🟢 Se você mudar o tempo no input, ele reinicia o motor na hora
+  }, [symbol, updateInterval]); 
 
   if (!prediction) return <div style={{color: '#888'}}>Aguardando IA...</div>;
   if (prediction.error) return <div style={{color: '#ff4444', fontWeight: 'bold'}}>❌ {prediction.error}</div>;
