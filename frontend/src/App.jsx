@@ -5,7 +5,6 @@ import AIPrediction from './AIPrediction';
 import { LineChart, Line, Tooltip, ResponsiveContainer } from 'recharts';
 
 export default function App() {
-  // 🟢 SELETOR DE MOEDA BASE (USDT, BRL, BNB)
   const [baseCurrency, setBaseCurrency] = useState(() => localStorage.getItem('bot_base_currency') || 'USDT');
   const [availableCoins, setAvailableCoins] = useState([]);
   
@@ -15,31 +14,39 @@ export default function App() {
   });
 
   const [currentData, setCurrentData] = useState({}); 
-  const [historyOpen, setHistoryOpen] = useState({}); // Aberturas 1h e 1d
+  const [orderBooks, setOrderBooks] = useState({}); // 🟢 Estado ultra-rápido para o Livro de Ofertas
+  const [historyOpen, setHistoryOpen] = useState({}); 
   const wsRef = useRef(null);
   const livePricesRef = useRef({});
   const lastSignalRef = useRef({});
   const highestPricesRef = useRef({}); 
   const [reasonsLog, setReasonsLog] = useState({});
 
+  // 🟢 ESTADOS DO MENU DE CONFIGURAÇÃO (HAMBURGER)
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  
   const [fee, setFee] = useState(() => Number(localStorage.getItem('bot_fee')) || 0.1);
   const [riskPct, setRiskPct] = useState(() => Number(localStorage.getItem('bot_risk_pct')) || 5);
   const [trailStop, setTrailStop] = useState(() => Number(localStorage.getItem('bot_trail_stop')) || 2);
   const [takeProfit, setTakeProfit] = useState(() => Number(localStorage.getItem('bot_tp')) || 5);
-  const [minVol, setMinVol] = useState(() => Number(localStorage.getItem('bot_vol')) || 0.15);
+  const [minVol, setMinVol] = useState(() => Number(localStorage.getItem('bot_vol')) || 0.05); // Reduzido para não travar a IA
+  const [bnbReserve, setBnbReserve] = useState(() => Number(localStorage.getItem('bot_bnb_reserve')) || 0);
+  
+  // 🟢 CONFIGURAÇÕES AVANÇADAS DA IA
+  const [aiSettings, setAiSettings] = useState(() => {
+    const saved = localStorage.getItem('bot_ai_settings');
+    return saved ? JSON.parse(saved) : { interval: 30, depth: 5, agressivity: 2.0, useEma: true };
+  });
+
   const [showCharts, setShowCharts] = useState(() => JSON.parse(localStorage.getItem('bot_show_charts') ?? 'true'));
   const [isRealMode, setIsRealMode] = useState(() => JSON.parse(localStorage.getItem('bot_real_mode') ?? 'false'));
-  const [bnbReserve, setBnbReserve] = useState(() => Number(localStorage.getItem('bot_bnb_reserve')) || 0);
-  const [aiInterval, setAiInterval] = useState(() => Number(localStorage.getItem('bot_ai_interval')) || 60);
 
-  // Formatação de Dinheiro Dinâmica
   const formatMoney = (value) => {
     if (baseCurrency === 'BRL') return `R$ ${value.toFixed(2)}`;
     if (baseCurrency === 'USDT') return `$ ${value.toFixed(2)}`;
     return `BNB ${value.toFixed(4)}`;
   };
 
-  // 🟢 BUSCA MOEDAS BASEADAS NA SELEÇÃO
   useEffect(() => {
     fetch('https://api.binance.com/api/v3/exchangeInfo')
       .then(res => res.json())
@@ -52,6 +59,22 @@ export default function App() {
       });
   }, [baseCurrency]);
 
+  // 🟢 BUSCA HISTÓRICO 1H e 1D INICIAL PARA PORCENTAGENS NÃO FICAREM ZERO
+  useEffect(() => {
+    selectedCoins.forEach(coin => {
+      fetch(`http://localhost:4000/api/candles/${coin.value}`)
+        .then(res => res.json())
+        .then(data => {
+          if(data['1h'] && data['1h'].length > 0) {
+            setHistoryOpen(prev => ({ ...prev, [`${coin.value}_1h`]: parseFloat(data['1h'][data['1h'].length - 1].open) }));
+          }
+          if(data['1d'] && data['1d'].length > 0) {
+            setHistoryOpen(prev => ({ ...prev, [`${coin.value}_1d`]: parseFloat(data['1d'][data['1d'].length - 1].open) }));
+          }
+        }).catch(() => {});
+    });
+  }, [selectedCoins]);
+
   useEffect(() => {
     localStorage.setItem('bot_base_currency', baseCurrency);
     localStorage.setItem(`bot_selected_coins_${baseCurrency}`, JSON.stringify(selectedCoins));
@@ -60,13 +83,12 @@ export default function App() {
     localStorage.setItem('bot_trail_stop', trailStop);
     localStorage.setItem('bot_tp', takeProfit);
     localStorage.setItem('bot_vol', minVol);
+    localStorage.setItem('bot_bnb_reserve', bnbReserve);
+    localStorage.setItem('bot_ai_settings', JSON.stringify(aiSettings));
     localStorage.setItem('bot_show_charts', showCharts);
     localStorage.setItem('bot_real_mode', isRealMode);
-    localStorage.setItem('bot_bnb_reserve', bnbReserve);
-    localStorage.setItem('bot_ai_interval', aiInterval);
-  }, [baseCurrency, selectedCoins, fee, riskPct, trailStop, takeProfit, minVol, showCharts, isRealMode, bnbReserve, aiInterval]);
+  }, [baseCurrency, selectedCoins, fee, riskPct, trailStop, takeProfit, minVol, bnbReserve, aiSettings, showCharts, isRealMode]);
 
-  // 🟢 CARTEIRA INTELIGENTE COM BASE NA MOEDA
   const getInitialWallet = () => {
     const saved = localStorage.getItem(`cryptoWallet_${baseCurrency}`);
     const startAmount = baseCurrency === 'BRL' ? 5000 : baseCurrency === 'USDT' ? 1000 : 5;
@@ -84,12 +106,9 @@ export default function App() {
   useEffect(() => { localStorage.setItem(`equityHistory_${baseCurrency}`, JSON.stringify(equityHistory)); }, [equityHistory, baseCurrency]);
   useEffect(() => { livePricesRef.current = currentData; }, [currentData]);
 
-  // Se trocar a moeda base, reseta a seleção de moedas
   const handleBaseCurrencyChange = (e) => {
     setBaseCurrency(e.target.value);
-    setSelectedCoins([]);
-    setCurrentData({});
-    setHistoryOpen({});
+    setSelectedCoins([]); setCurrentData({}); setHistoryOpen({}); setOrderBooks({});
     setWallet({ quote: e.target.value === 'BRL' ? 5000 : e.target.value === 'USDT' ? 1000 : 5, balances: {}, entryPrices: {}, logs: [] });
     setEquityHistory([{ time: 'Início', value: e.target.value === 'BRL' ? 5000 : e.target.value === 'USDT' ? 1000 : 5 }]);
   };
@@ -105,7 +124,10 @@ export default function App() {
     if (!currentPrice || !openPrice) return;
 
     if (motivo === "IA" && lastSignalRef.current[symbol] === signal) return;
+    
+    // Trava de volatilidade (Cuidado para não usar valores altos aqui, senão a IA nunca compra)
     if (motivo === "IA" && signal === 'COMPRAR' && ((Math.abs(currentPrice - openPrice) / openPrice) * 100) < minVol) return; 
+    
     if (motivo === "IA") lastSignalRef.current[symbol] = signal;
     
     setWallet(prevWallet => {
@@ -151,7 +173,7 @@ export default function App() {
           delete newWallet.entryPrices[symbol];
           delete highestPricesRef.current[symbol];
         }
-        logMsg = `🔴 [VENDA] ${symbol} via ${motivo} (${formatMoney(currentPrice)}) | Resultado: ${lucroPrejuizo >= 0 ? '+' : ''}${formatMoney(lucroPrejuizo)}`;
+        logMsg = `🔴 [VENDA] ${symbol} via ${motivo} (${formatMoney(currentPrice)}) | Res: ${lucroPrejuizo >= 0 ? '+' : ''}${formatMoney(lucroPrejuizo)}`;
         tradeClosed = true;
       }
 
@@ -193,10 +215,18 @@ export default function App() {
     const ws = new WebSocket('ws://localhost:4000');
     wsRef.current = ws;
     ws.onopen = () => ws.send(JSON.stringify({ action: 'update_subscriptions', symbols: selectedCoins.map(c => c.value) }));
+    
     ws.onmessage = (e) => {
       const data = JSON.parse(e.data);
-      if (data.interval === '1m') setCurrentData(prev => ({ ...prev, [data.symbol]: data }));
-      else setHistoryOpen(prev => ({ ...prev, [`${data.symbol}_${data.interval}`]: data.open })); // Salva aberturas longas
+      // 🟢 O Livro de Ofertas chega voando por aqui
+      if (data.action === 'book') {
+        setOrderBooks(prev => ({ ...prev, [data.symbol]: data.data }));
+      } 
+      // 🟢 As velas chegam por aqui
+      else if (data.action === 'kline') {
+        if (data.interval === '1m') setCurrentData(prev => ({ ...prev, [data.symbol]: data }));
+        else setHistoryOpen(prev => ({ ...prev, [`${data.symbol}_${data.interval}`]: data.open }));
+      }
     };
     return () => ws.close();
   }, [selectedCoins]);
@@ -205,13 +235,11 @@ export default function App() {
   Object.entries(wallet.balances).forEach(([s, a]) => { totalPortfolioValue += (a * (currentData[s]?.close || 0)); });
   const startAmount = baseCurrency === 'BRL' ? 5000 : baseCurrency === 'USDT' ? 1000 : 5;
   const pnlPct = ((totalPortfolioValue - startAmount) / startAmount) * 100;
-  
   const tradesFechados = wallet.logs.filter(l => l.includes('🔴'));
   const winRate = tradesFechados.length > 0 ? (tradesFechados.filter(l => l.includes('Resultado: +')).length / tradesFechados.length) * 100 : 0;
 
   const scrollListStyle = { marginTop: '10px', padding: '5px', maxHeight: '80px', overflowY: 'auto', fontSize: '0.72rem', borderTop: '1px solid #333', backgroundColor: '#161616', borderRadius: '4px' };
 
-  // Função para Variação do Card
   const getVar = (sym, tf) => {
     const cur = currentData[sym]?.close;
     const op = tf === '1m' ? currentData[sym]?.open : historyOpen[`${sym}_${tf}`];
@@ -221,41 +249,72 @@ export default function App() {
   return (
     <div style={{ padding: '20px', backgroundColor: '#121212', color: '#fff', minHeight: '100vh', fontFamily: 'sans-serif' }}>
       
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-        <h1 style={{ margin: 0 }}>AI Crypto Terminal Pro</h1>
-        <div style={{ display: 'flex', gap: '15px', alignItems: 'center' }}>
+      {/* 🟢 MODAL DE CONFIGURAÇÕES (HAMBURGER) */}
+      {isSettingsOpen && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.85)', zIndex: 9999, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+          <div style={{ backgroundColor: '#1e1e1e', padding: '30px', borderRadius: '12px', width: '90%', maxWidth: '800px', border: '1px solid #444', position: 'relative' }}>
+            <button onClick={() => setIsSettingsOpen(false)} style={{ position: 'absolute', top: '15px', right: '20px', background: 'transparent', border: 'none', color: '#fff', fontSize: '1.5rem', cursor: 'pointer' }}>✖</button>
+            <h2 style={{ margin: '0 0 20px 0', color: '#00d2ff' }}>⚙️ Configurações do Cockpit</h2>
+            
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '20px' }}>
+              {/* Financeiro */}
+              <div style={{ background: '#161616', padding: '15px', borderRadius: '8px', border: '1px solid #333' }}>
+                <h4 style={{ margin: '0 0 10px 0', color: '#888' }}>💰 Financeiro & Risco</h4>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  <label style={{ fontSize: '0.8rem' }}>Taxa Corretora (%) <input type="number" value={fee} onChange={e => setFee(Number(e.target.value))} step="0.01" style={{ width: '100%', background: '#121212', border: '1px solid #444', color: '#fff', padding: '5px', marginTop: '5px' }} /></label>
+                  <label style={{ fontSize: '0.8rem' }}>Risco por Trade (%) <input type="number" value={riskPct} onChange={e => setRiskPct(Number(e.target.value))} style={{ width: '100%', background: '#121212', border: '1px solid #444', color: '#fff', padding: '5px', marginTop: '5px' }} /></label>
+                  <label style={{ fontSize: '0.8rem' }}>Trailing Stop (%) <input type="number" value={trailStop} onChange={e => setTrailStop(Number(e.target.value))} style={{ width: '100%', background: '#121212', border: '1px solid #444', color: '#fff', padding: '5px', marginTop: '5px' }} /></label>
+                  <label style={{ fontSize: '0.8rem' }}>Take Profit (%) <input type="number" value={takeProfit} onChange={e => setTakeProfit(Number(e.target.value))} style={{ width: '100%', background: '#121212', border: '1px solid #444', color: '#fff', padding: '5px', marginTop: '5px' }} /></label>
+                  <label style={{ fontSize: '0.8rem' }}>Reserva BNB (Qtd) <input type="number" value={bnbReserve} onChange={e => setBnbReserve(Number(e.target.value))} step="0.1" style={{ width: '100%', background: '#121212', border: '1px solid #444', color: '#fff', padding: '5px', marginTop: '5px' }} /></label>
+                </div>
+              </div>
+
+              {/* IA Engine */}
+              <div style={{ background: '#161616', padding: '15px', borderRadius: '8px', border: '1px solid #333' }}>
+                <h4 style={{ margin: '0 0 10px 0', color: '#888' }}>🧠 Motor de Inteligência Artificial</h4>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  <label style={{ fontSize: '0.8rem', color: '#ff9900' }}>Volatilidade Mín. p/ Compra (%) <input type="number" value={minVol} onChange={e => setMinVol(Number(e.target.value))} step="0.05" style={{ width: '100%', background: '#121212', border: '1px solid #444', color: '#fff', padding: '5px', marginTop: '5px' }} /></label>
+                  <label style={{ fontSize: '0.8rem' }}>Tempo de Raciocínio (Seg) <input type="number" value={aiSettings.interval} onChange={e => setAiSettings({...aiSettings, interval: Number(e.target.value)})} step="5" min="10" style={{ width: '100%', background: '#121212', border: '1px solid #444', color: '#fff', padding: '5px', marginTop: '5px' }} /></label>
+                  <label style={{ fontSize: '0.8rem' }}>Agressividade (Peso Compra) <input type="number" value={aiSettings.agressivity} onChange={e => setAiSettings({...aiSettings, agressivity: Number(e.target.value)})} step="0.5" title="Valores acima de 1 forçam a IA a comprar mais" style={{ width: '100%', background: '#121212', border: '1px solid #444', color: '#fff', padding: '5px', marginTop: '5px' }} /></label>
+                  <label style={{ fontSize: '0.8rem' }}>Profundidade da Árvore (Depth) <input type="number" value={aiSettings.depth} onChange={e => setAiSettings({...aiSettings, depth: Number(e.target.value)})} step="1" max="10" style={{ width: '100%', background: '#121212', border: '1px solid #444', color: '#fff', padding: '5px', marginTop: '5px' }} /></label>
+                  <label style={{ fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '10px', marginTop: '10px' }}>
+                    <input type="checkbox" checked={aiSettings.useEma} onChange={e => setAiSettings({...aiSettings, useEma: e.target.checked})} />
+                    Trava de Inverno - Bloquear se menor EMA 200
+                  </label>
+                </div>
+              </div>
+            </div>
+            <button onClick={() => setIsSettingsOpen(false)} style={{ width: '100%', padding: '15px', marginTop: '20px', backgroundColor: '#00ff88', color: '#000', border: 'none', borderRadius: '8px', fontWeight: 'bold', fontSize: '1rem', cursor: 'pointer' }}>Salvar & Fechar</button>
+          </div>
+        </div>
+      )}
+
+      {/* HEADER LIMPO */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', backgroundColor: '#1e1e1e', padding: '15px 25px', borderRadius: '10px', border: '1px solid #333' }}>
+        <h1 style={{ margin: 0, fontSize: '1.5rem', display: 'flex', alignItems: 'center', gap: '15px' }}>
+          <button onClick={() => setIsSettingsOpen(true)} style={{ background: 'transparent', border: 'none', color: '#aaa', fontSize: '1.5rem', cursor: 'pointer', padding: 0 }} title="Configurações">⚙️</button>
+          AI Crypto Terminal Pro
+        </h1>
+        
+        <div style={{ display: 'flex', gap: '15px', alignItems: 'center', flexWrap: 'wrap' }}>
+          <Select isMulti options={availableCoins} value={selectedCoins} onChange={setSelectedCoins} placeholder="Selecione as Moedas..." styles={{ control: (b) => ({ ...b, backgroundColor: '#121212', borderColor: '#444', minWidth: '300px'}), menu: (b) => ({ ...b, backgroundColor: '#1e1e1e', zIndex: 999 }), option: (b, s) => ({ ...b, backgroundColor: s.isFocused ? '#333' : '#1e1e1e', color: '#fff' }), multiValue: (b) => ({ ...b, backgroundColor: '#333' }), multiValueLabel: (b) => ({ ...b, color: '#fff' }) }} />
           
-          <select value={baseCurrency} onChange={handleBaseCurrencyChange} style={{ padding: '8px', backgroundColor: '#1e1e1e', color: '#fff', border: '1px solid #444', borderRadius: '5px', fontWeight: 'bold' }}>
+          <select value={baseCurrency} onChange={handleBaseCurrencyChange} style={{ padding: '9px', backgroundColor: '#121212', color: '#fff', border: '1px solid #444', borderRadius: '5px', fontWeight: 'bold' }}>
             <option value="USDT">Par: USDT</option>
             <option value="BRL">Par: BRL</option>
             <option value="BNB">Par: BNB</option>
           </select>
 
           <label style={{ fontSize: '0.85rem', color: '#aaa', cursor: 'pointer' }}>
-            <input type="checkbox" checked={showCharts} onChange={e => setShowCharts(e.target.checked)} style={{ marginRight: '5px' }} />
-            Exibir Gráficos
+            <input type="checkbox" checked={showCharts} onChange={e => setShowCharts(e.target.checked)} style={{ marginRight: '5px' }} /> Gráficos
           </label>
 
           <label style={{ fontSize: '0.85rem', color: isRealMode ? '#ff4444' : '#00d2ff', cursor: 'pointer', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '5px', backgroundColor: isRealMode ? 'rgba(255,68,68,0.1)' : 'rgba(0,210,255,0.1)', padding: '6px 12px', borderRadius: '6px', border: `1px solid ${isRealMode ? '#ff4444' : '#00d2ff'}` }}>
             <input type="checkbox" checked={isRealMode} onChange={e => setIsRealMode(e.target.checked)} style={{ display: 'none' }} />
-            {isRealMode ? '🔥 MODO REAL (BINANCE)' : '🧪 MODO SIMULAÇÃO'}
+            {isRealMode ? '🔥 MODO REAL' : '🧪 SIMULAÇÃO'}
           </label>
 
-          <button onClick={resetWallet} style={{ backgroundColor: '#ff4444', color: '#fff', border: 'none', padding: '10px 15px', borderRadius: '5px', cursor: 'pointer', fontWeight: 'bold' }}>🔄 Resetar</button>
-        </div>
-      </div>
-
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '15px', alignItems: 'flex-end', backgroundColor: '#1e1e1e', padding: '15px', borderRadius: '10px', border: '1px solid #333', marginBottom: '20px' }}>
-        <div style={{ display: 'flex', flexDirection: 'column', flex: '1 1 100px' }}><label style={{ fontSize: '0.75rem', color: '#888', marginBottom: '5px' }}>Taxa (%)</label><input type="number" value={fee} onChange={e => setFee(Number(e.target.value))} step="0.01" style={{ backgroundColor: '#121212', border: '1px solid #444', color: '#fff', padding: '8px', borderRadius: '5px' }} /></div>
-        <div style={{ display: 'flex', flexDirection: 'column', flex: '1 1 100px' }}><label style={{ fontSize: '0.75rem', color: '#00d2ff', marginBottom: '5px' }}>Risco/Trade (%)</label><input type="number" value={riskPct} onChange={e => setRiskPct(Number(e.target.value))} style={{ backgroundColor: '#121212', border: '1px solid #444', color: '#00d2ff', padding: '8px', borderRadius: '5px' }} /></div>
-        <div style={{ display: 'flex', flexDirection: 'column', flex: '1 1 100px' }}><label style={{ fontSize: '0.75rem', color: '#ff4444', marginBottom: '5px' }}>Trail Stop (%)</label><input type="number" value={trailStop} onChange={e => setTrailStop(Number(e.target.value))} style={{ backgroundColor: '#121212', border: '1px solid #444', color: '#ff4444', padding: '8px', borderRadius: '5px' }} /></div>
-        <div style={{ display: 'flex', flexDirection: 'column', flex: '1 1 100px' }}><label style={{ fontSize: '0.75rem', color: '#00ff88', marginBottom: '5px' }}>Take Profit (%)</label><input type="number" value={takeProfit} onChange={e => setTakeProfit(Number(e.target.value))} style={{ backgroundColor: '#121212', border: '1px solid #444', color: '#00ff88', padding: '8px', borderRadius: '5px' }} /></div>
-        <div style={{ display: 'flex', flexDirection: 'column', flex: '1 1 100px' }}><label style={{ fontSize: '0.75rem', color: '#ff9900', marginBottom: '5px' }}>Volatilidade (%)</label><input type="number" value={minVol} onChange={e => setMinVol(Number(e.target.value))} step="0.05" style={{ backgroundColor: '#121212', border: '1px solid #444', color: '#ff9900', padding: '8px', borderRadius: '5px' }} /></div>
-        <div style={{ display: 'flex', flexDirection: 'column', flex: '1 1 100px' }}><label style={{ fontSize: '0.75rem', color: '#f3ba2f', marginBottom: '5px' }}>Reserva BNB</label><input type="number" value={bnbReserve} onChange={e => setBnbReserve(Number(e.target.value))} step="0.1" style={{ backgroundColor: '#121212', border: '1px solid #444', color: '#f3ba2f', padding: '8px', borderRadius: '5px' }} /></div>
-        <div style={{ display: 'flex', flexDirection: 'column', flex: '1 1 100px' }}><label style={{ fontSize: '0.75rem', color: '#b19cd9', marginBottom: '5px' }}>Tempo IA (s)</label><input type="number" value={aiInterval} onChange={e => setAiInterval(Number(e.target.value))} step="5" min="10" style={{ backgroundColor: '#121212', border: '1px solid #444', color: '#b19cd9', padding: '8px', borderRadius: '5px' }} /></div>
-        <div style={{ display: 'flex', flexDirection: 'column', flex: '2 1 250px' }}>
-          <label style={{ fontSize: '0.75rem', color: '#888', marginBottom: '5px' }}>Moedas (Par {baseCurrency})</label>
-          <Select isMulti options={availableCoins} value={selectedCoins} onChange={setSelectedCoins} placeholder="Selecione..." styles={{ control: (b) => ({ ...b, backgroundColor: '#121212', borderColor: '#444'}), menu: (b) => ({ ...b, backgroundColor: '#1e1e1e', zIndex: 999 }), option: (b, s) => ({ ...b, backgroundColor: s.isFocused ? '#333' : '#1e1e1e', color: '#fff' }), multiValue: (b) => ({ ...b, backgroundColor: '#333' }), multiValueLabel: (b) => ({ ...b, color: '#fff' }) }} />
+          <button onClick={resetWallet} style={{ backgroundColor: '#ff4444', color: '#fff', border: 'none', padding: '10px 15px', borderRadius: '5px', cursor: 'pointer', fontWeight: 'bold' }}>🔄 Reset</button>
         </div>
       </div>
 
@@ -324,6 +383,7 @@ export default function App() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
           {selectedCoins.map(coin => {
             const d = currentData[coin.value];
+            const book = orderBooks[coin.value]; // 🟢 Extrai do novo estado rápido
             const v1m = getVar(coin.value, '1m');
             const v1h = getVar(coin.value, '1h');
             const v24h = getVar(coin.value, '1d');
@@ -334,7 +394,6 @@ export default function App() {
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '10px' }}>
                   <div>
                     <h3 style={{ margin: 0, color: '#ff9900' }}>{coin.label}</h3>
-                    {/* 🟢 BADGES DE VARIAÇÃO NO CARD */}
                     <div style={{ display: 'flex', gap: '10px', marginTop: '10px', fontSize: '0.75rem' }}>
                       <span style={{ color: v1m >= 0 ? '#00ff88' : '#ff4444', backgroundColor: 'rgba(255,255,255,0.05)', padding: '4px 8px', borderRadius: '4px' }}>{v1m >= 0 ? '▲ subiu' : '▼ caiu'} {Math.abs(v1m)}%/min</span>
                       <span style={{ color: v1h >= 0 ? '#00ff88' : '#ff4444', backgroundColor: 'rgba(255,255,255,0.05)', padding: '4px 8px', borderRadius: '4px' }}>{v1h >= 0 ? '▲ subiu' : '▼ caiu'} {Math.abs(v1h)}%/hora</span>
@@ -346,25 +405,26 @@ export default function App() {
                   </div>
                 </div>
                 
-                <AIPrediction symbol={coin.value} onUpdate={handleAiUpdate} updateInterval={aiInterval} />
+                {/* 🟢 PASSANDO AS CONFIGURAÇÕES DA IA PARA O COMPONENTE */}
+                <AIPrediction symbol={coin.value} onUpdate={handleAiUpdate} aiSettings={aiSettings} />
                 
                 <div style={{ display: 'flex', gap: '15px', marginTop: '15px', borderTop: '1px solid #2a2a2a', paddingTop: '15px' }}>
                   {showCharts && <div style={{ flex: 3 }}><Chart symbol={coin.value} liveData={d} /></div>}
                   
-                  {/* 🟢 O LIVRO DE OFERTAS AO LADO DO GRÁFICO */}
+                  {/* 🟢 LIVRO DE OFERTAS AGORA PULSA INDEPENDENTE */}
                   <div style={{ flex: 1, backgroundColor: '#161616', padding: '10px', borderRadius: '8px', border: '1px solid #333', minWidth: '180px' }}>
                     <h4 style={{ margin: '0 0 10px 0', color: '#888', fontSize: '0.8rem', textAlign: 'center' }}>📖 Livro de Ofertas</h4>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '0.75rem', fontFamily: 'monospace' }}>
                       <div style={{ backgroundColor: 'rgba(255,68,68,0.1)', padding: '8px', borderRadius: '4px', borderLeft: '2px solid #ff4444' }}>
                         <span style={{ color: '#aaa' }}>Venda (Ask)</span><br/>
-                        <strong style={{ color: '#ff4444', fontSize: '0.9rem' }}>{d?.ask_price ? formatMoney(d.ask_price) : '...'}</strong><br/>
-                        <span style={{ color: '#888' }}>Vol: {d?.ask_volume?.toFixed(2) || '...'}</span>
+                        <strong style={{ color: '#ff4444', fontSize: '0.9rem' }}>{book?.askPrice ? formatMoney(book.askPrice) : '...'}</strong><br/>
+                        <span style={{ color: '#888' }}>Vol: {book?.askQty?.toFixed(2) || '...'}</span>
                       </div>
                       <div style={{ textAlign: 'center', color: '#555', fontSize: '0.6rem' }}>SPREAD</div>
                       <div style={{ backgroundColor: 'rgba(0,255,136,0.1)', padding: '8px', borderRadius: '4px', borderLeft: '2px solid #00ff88' }}>
                         <span style={{ color: '#aaa' }}>Compra (Bid)</span><br/>
-                        <strong style={{ color: '#00ff88', fontSize: '0.9rem' }}>{d?.bid_price ? formatMoney(d.bid_price) : '...'}</strong><br/>
-                        <span style={{ color: '#888' }}>Vol: {d?.bid_volume?.toFixed(2) || '...'}</span>
+                        <strong style={{ color: '#00ff88', fontSize: '0.9rem' }}>{book?.bidPrice ? formatMoney(book.bidPrice) : '...'}</strong><br/>
+                        <span style={{ color: '#888' }}>Vol: {book?.bidQty?.toFixed(2) || '...'}</span>
                       </div>
                     </div>
                   </div>
@@ -374,7 +434,6 @@ export default function App() {
           )})}
         </div>
       </div>
-
       <style>{`
         .custom-scroll::-webkit-scrollbar { width: 4px; }
         .custom-scroll::-webkit-scrollbar-track { background: #121212; }

@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 import pandas as pd
 import requests
@@ -17,7 +17,6 @@ def processar_tempo_grafico(dados_json, prefixo):
     df['time'] = pd.to_datetime(df['time'], unit='s')
     df.set_index('time', inplace=True)
     
-    # 🟢 Convertendo as colunas novas do Order Book
     for col in ['open', 'high', 'low', 'close', 'volume', 'bid_volume', 'ask_volume']: 
         if col in df.columns:
             df[col] = df[col].astype(float)
@@ -38,12 +37,10 @@ def processar_tempo_grafico(dados_json, prefixo):
     df['Volume_SMA_20'] = df['volume'].rolling(window=20).mean()
     df['Volume_Forca'] = df['volume'] / (df['Volume_SMA_20'] + 1e-9) 
     
-    # 🟢 O INDICADOR INSTITUCIONAL: Desequilíbrio do Livro de Ofertas
     if 'bid_volume' in df.columns and 'ask_volume' in df.columns:
-        # Calcula a % de força compradora contra a vendedora
         df['Order_Imbalance'] = df['bid_volume'] / (df['bid_volume'] + df['ask_volume'] + 1e-9)
     else:
-        df['Order_Imbalance'] = 0.5 # Se não tiver dados, considera 50/50 (Neutro)
+        df['Order_Imbalance'] = 0.5 
     
     colunas_estudo = ['close', 'Forca_Vela', 'Distancia_SMA', 'RSI', 'MACD', 'MACD_Signal', 'BB_High_Indicator', 'BB_Low_Indicator', 'Volume_Forca', 'Order_Imbalance']
 
@@ -56,7 +53,8 @@ def processar_tempo_grafico(dados_json, prefixo):
     df.columns = [f"{prefixo}_{col}" for col in df.columns]
     return df
 
-def preparar_dados_e_treinar(symbol):
+# 🟢 PARÂMETROS DINÂMICOS RECEBIDOS DO REACT
+def preparar_dados_e_treinar(symbol, ai_depth, ai_agressivity, use_ema):
     try:
         resposta = requests.get(f'http://localhost:4000/api/candles/{symbol}')
         dados_completos = resposta.json()
@@ -94,10 +92,12 @@ def preparar_dados_e_treinar(symbol):
         y = df_treino['Target']
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, shuffle=False)
         
+        # 🟢 IA CONFIGURADA PELO FRONTEND
         modelo = XGBClassifier(
-            n_estimators=150,
+            n_estimators=100,
             learning_rate=0.05,
-            max_depth=5,
+            max_depth=ai_depth,
+            scale_pos_weight=ai_agressivity, # Agressividade
             random_state=42,
             eval_metric='logloss'
         )
@@ -112,7 +112,9 @@ def preparar_dados_e_treinar(symbol):
         top_reasons = [f"{feat.replace('_', ' ')} ({round(imp * 100, 1)}%)" for feat, imp in feature_importance[:2]]
 
         distancia_ema = linha_atual['Distancia_Macro_EMA200'].values[0]
-        if previsao == 1 and distancia_ema < 0:
+        
+        # 🟢 FILTRO EMA LIGADO OU DESLIGADO PELO USUÁRIO
+        if use_ema and previsao == 1 and distancia_ema < 0:
             previsao = 0
             top_reasons = ["⚠️ BLOQUEADO: Preço abaixo da EMA 200"] + top_reasons
 
@@ -130,8 +132,13 @@ def preparar_dados_e_treinar(symbol):
 
 @app.route('/api/predict/<symbol>', methods=['GET'])
 def predict(symbol):
-    return jsonify(preparar_dados_e_treinar(symbol.upper()))
+    # Captura os parametros da URL enviados pelo React
+    ai_depth = int(request.args.get('depth', 5))
+    ai_agressivity = float(request.args.get('agressivity', 2.0))
+    use_ema = request.args.get('ema', 'true') == 'true'
+    
+    return jsonify(preparar_dados_e_treinar(symbol.upper(), ai_depth, ai_agressivity, use_ema))
 
 if __name__ == '__main__':
-    print("🚀 Cérebro HFT (XGBoost + OrderBook) a rodar na porta 5000...")
+    print("🚀 Cérebro HFT com Parâmetros Dinâmicos rodando na 5000...")
     app.run(port=5000, debug=True)

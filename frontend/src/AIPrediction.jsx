@@ -1,18 +1,23 @@
 import { useState, useEffect } from 'react';
 
-export default function AIPrediction({ symbol, onUpdate, updateInterval = 60 }) {
+export default function AIPrediction({ symbol, onUpdate, aiSettings }) {
   const [prediction, setPrediction] = useState(null);
 
   useEffect(() => {
     const fetchPrediction = async () => {
       try {
-        const res = await fetch(`http://localhost:5000/api/predict/${symbol}`);
+        // 🟢 Enviando os parâmetros do usuário para o Cérebro Python
+        const params = new URLSearchParams({
+          depth: aiSettings.depth,
+          agressivity: aiSettings.agressivity,
+          ema: aiSettings.useEma
+        });
+
+        const res = await fetch(`http://localhost:5000/api/predict/${symbol}?${params}`);
         const data = await res.json();
         
-        // 🟢 CORREÇÃO: Agora a tela atualiza o estado MESMO se a IA retornar um {error}
         if (data) {
           setPrediction(data);
-          // Só tenta repassar para o App.jsx se a previsão for válida e não um erro
           if (data.prediction) {
             onUpdate(symbol, data.prediction, data.reasons);
           }
@@ -23,11 +28,10 @@ export default function AIPrediction({ symbol, onUpdate, updateInterval = 60 }) 
     };
 
     fetchPrediction(); 
-    
-    const interval = setInterval(fetchPrediction, updateInterval * 1000); 
+    const interval = setInterval(fetchPrediction, aiSettings.interval * 1000); 
     
     return () => clearInterval(interval);
-  }, [symbol, updateInterval]); 
+  }, [symbol, aiSettings]); 
 
   if (!prediction) return <div style={{color: '#888'}}>Aguardando IA...</div>;
   if (prediction.error) return <div style={{color: '#ff4444', fontWeight: 'bold'}}>❌ {prediction.error}</div>;
