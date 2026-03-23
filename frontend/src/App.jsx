@@ -1,80 +1,66 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import Select from 'react-select';
-import Chart from './Chart';
-import AIPrediction from './AIPrediction';
-import { LineChart, Line, Tooltip, ResponsiveContainer } from 'recharts';
+import SettingsModal from './components/SettingsModal';
+import WalletPanel from './components/WalletPanel';
+import TradeLog from './components/TradeLog';
+import AIDiary from './components/AIDiary';
+import CoinCard from './components/CoinCard';
+import useTradingLogic from './hooks/useTradingLogic';
 
 export default function App() {
+  // Estados de UI
   const [baseCurrency, setBaseCurrency] = useState(() => localStorage.getItem('bot_base_currency') || 'USDT');
   const [availableCoins, setAvailableCoins] = useState([]);
-  
   const [selectedCoins, setSelectedCoins] = useState(() => {
     const saved = localStorage.getItem(`bot_selected_coins_${baseCurrency}`);
     return saved ? JSON.parse(saved) : [{ value: `BTC${baseCurrency}`, label: `BTC (${baseCurrency})` }];
   });
-
-  const [currentData, setCurrentData] = useState({}); 
-  const [orderBooks, setOrderBooks] = useState({}); // 🟢 Estado ultra-rápido para o Livro de Ofertas
-  const [historyOpen, setHistoryOpen] = useState({}); 
+  const [currentData, setCurrentData] = useState({});
+  const [orderBooks, setOrderBooks] = useState({});
+  const [historyOpen, setHistoryOpen] = useState({});
   const wsRef = useRef(null);
-  const livePricesRef = useRef({});
-  const lastSignalRef = useRef({});
-  const highestPricesRef = useRef({}); 
-  const [reasonsLog, setReasonsLog] = useState({});
+  const [wsReady, setWsReady] = useState(false);
 
-  // 🟢 ESTADOS DO MENU DE CONFIGURAÇÃO (HAMBURGER)
+  // Configurações
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  
   const [fee, setFee] = useState(() => Number(localStorage.getItem('bot_fee')) || 0.1);
   const [riskPct, setRiskPct] = useState(() => Number(localStorage.getItem('bot_risk_pct')) || 5);
   const [trailStop, setTrailStop] = useState(() => Number(localStorage.getItem('bot_trail_stop')) || 2);
   const [takeProfit, setTakeProfit] = useState(() => Number(localStorage.getItem('bot_tp')) || 5);
-  const [minVol, setMinVol] = useState(() => Number(localStorage.getItem('bot_vol')) || 0.05); // Reduzido para não travar a IA
+  const [minVol, setMinVol] = useState(() => Number(localStorage.getItem('bot_vol')) || 0.05);
   const [bnbReserve, setBnbReserve] = useState(() => Number(localStorage.getItem('bot_bnb_reserve')) || 0);
-  
-  // 🟢 CONFIGURAÇÕES AVANÇADAS DA IA
   const [aiSettings, setAiSettings] = useState(() => {
     const saved = localStorage.getItem('bot_ai_settings');
     return saved ? JSON.parse(saved) : { interval: 30, depth: 5, agressivity: 2.0, useEma: true };
   });
-
   const [showCharts, setShowCharts] = useState(() => JSON.parse(localStorage.getItem('bot_show_charts') ?? 'true'));
   const [isRealMode, setIsRealMode] = useState(() => JSON.parse(localStorage.getItem('bot_real_mode') ?? 'false'));
 
-  const formatMoney = (value) => {
-    if (baseCurrency === 'BRL') return `R$ ${value.toFixed(2)}`;
-    if (baseCurrency === 'USDT') return `$ ${value.toFixed(2)}`;
-    return `BNB ${value.toFixed(4)}`;
-  };
+  // Hook de lógica de trading
+  const {
+    wallet,
+    equityHistory,
+    reasonsLog,
+    totalPortfolioValue,
+    pnlPct,
+    winRate,
+    tradesFechados,
+    handleAiUpdate,
+    resetWallet,
+    formatMoney,
+  } = useTradingLogic({
+    baseCurrency,
+    selectedCoins,
+    currentData,
+    minVol,
+    fee,
+    riskPct,
+    trailStop,
+    takeProfit,
+    bnbReserve,
+  });
 
-  useEffect(() => {
-    fetch('https://api.binance.com/api/v3/exchangeInfo')
-      .then(res => res.json())
-      .then(data => {
-        const pairs = data.symbols
-          .filter(s => s.quoteAsset === baseCurrency && s.status === 'TRADING')
-          .map(s => ({ value: s.symbol, label: `${s.baseAsset} (${s.symbol})` }));
-        pairs.sort((a, b) => a.label.localeCompare(b.label));
-        setAvailableCoins(pairs);
-      });
-  }, [baseCurrency]);
-
-  // 🟢 BUSCA HISTÓRICO 1H e 1D INICIAL PARA PORCENTAGENS NÃO FICAREM ZERO
-  useEffect(() => {
-    selectedCoins.forEach(coin => {
-      fetch(`http://localhost:4000/api/candles/${coin.value}`)
-        .then(res => res.json())
-        .then(data => {
-          if(data['1h'] && data['1h'].length > 0) {
-            setHistoryOpen(prev => ({ ...prev, [`${coin.value}_1h`]: parseFloat(data['1h'][data['1h'].length - 1].open) }));
-          }
-          if(data['1d'] && data['1d'].length > 0) {
-            setHistoryOpen(prev => ({ ...prev, [`${coin.value}_1d`]: parseFloat(data['1d'][data['1d'].length - 1].open) }));
-          }
-        }).catch(() => {});
-    });
-  }, [selectedCoins]);
-
+  // Persistir configurações (exceto carteira, já persistida no hook)
   useEffect(() => {
     localStorage.setItem('bot_base_currency', baseCurrency);
     localStorage.setItem(`bot_selected_coins_${baseCurrency}`, JSON.stringify(selectedCoins));
@@ -89,216 +75,131 @@ export default function App() {
     localStorage.setItem('bot_real_mode', isRealMode);
   }, [baseCurrency, selectedCoins, fee, riskPct, trailStop, takeProfit, minVol, bnbReserve, aiSettings, showCharts, isRealMode]);
 
-  const getInitialWallet = () => {
-    const saved = localStorage.getItem(`cryptoWallet_${baseCurrency}`);
-    const startAmount = baseCurrency === 'BRL' ? 5000 : baseCurrency === 'USDT' ? 1000 : 5;
-    return saved ? JSON.parse(saved) : { quote: startAmount, balances: {}, entryPrices: {}, logs: [] };
-  };
-  const [wallet, setWallet] = useState(getInitialWallet);
-
-  const [equityHistory, setEquityHistory] = useState(() => {
-    const saved = localStorage.getItem(`equityHistory_${baseCurrency}`);
-    const startAmount = baseCurrency === 'BRL' ? 5000 : baseCurrency === 'USDT' ? 1000 : 5;
-    return (saved && JSON.parse(saved).length > 1) ? JSON.parse(saved) : [{ time: 'Início', value: startAmount }, { time: 'Agora', value: startAmount }];
-  });
-
-  useEffect(() => { localStorage.setItem(`cryptoWallet_${baseCurrency}`, JSON.stringify(wallet)); }, [wallet, baseCurrency]);
-  useEffect(() => { localStorage.setItem(`equityHistory_${baseCurrency}`, JSON.stringify(equityHistory)); }, [equityHistory, baseCurrency]);
-  useEffect(() => { livePricesRef.current = currentData; }, [currentData]);
-
-  const handleBaseCurrencyChange = (e) => {
-    setBaseCurrency(e.target.value);
-    setSelectedCoins([]); setCurrentData({}); setHistoryOpen({}); setOrderBooks({});
-    setWallet({ quote: e.target.value === 'BRL' ? 5000 : e.target.value === 'USDT' ? 1000 : 5, balances: {}, entryPrices: {}, logs: [] });
-    setEquityHistory([{ time: 'Início', value: e.target.value === 'BRL' ? 5000 : e.target.value === 'USDT' ? 1000 : 5 }]);
-  };
-
-  const handleAiUpdate = (symbol, signal, reasons) => {
-    setReasonsLog(prev => ({ ...prev, [symbol]: { time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), signal, reasons } }));
-    handleBotAction(symbol, signal, "IA");
-  };
-
-  const handleBotAction = (symbol, signal, motivo = "IA") => {
-    const currentPrice = livePricesRef.current[symbol]?.close;
-    const openPrice = livePricesRef.current[symbol]?.open;
-    if (!currentPrice || !openPrice) return;
-
-    if (motivo === "IA" && lastSignalRef.current[symbol] === signal) return;
-    
-    // Trava de volatilidade (Cuidado para não usar valores altos aqui, senão a IA nunca compra)
-    if (motivo === "IA" && signal === 'COMPRAR' && ((Math.abs(currentPrice - openPrice) / openPrice) * 100) < minVol) return; 
-    
-    if (motivo === "IA") lastSignalRef.current[symbol] = signal;
-    
-    setWallet(prevWallet => {
-      let newWallet = { ...prevWallet, balances: { ...prevWallet.balances }, entryPrices: { ...prevWallet.entryPrices }, logs: [...prevWallet.logs] };
-      let coinBalance = newWallet.balances[symbol] || 0;
-      let logMsg = "";
-      let tradeClosed = false; 
-
-      const bnbSymbol = `BNB${baseCurrency}`;
-      const hasBnbReserve = (newWallet.balances[bnbSymbol] || 0) >= bnbReserve && bnbReserve > 0;
-      const taxaAplicada = hasBnbReserve ? (fee * 0.75) : fee; 
-      const taxaDecimal = taxaAplicada / 100;
-      const minTrade = baseCurrency === 'BRL' ? 10 : baseCurrency === 'USDT' ? 5 : 0.05;
-
-      if (signal === 'COMPRAR' && newWallet.quote >= minTrade) {
-        let amountToRisk = newWallet.quote * (riskPct / 100);
-        if (amountToRisk < minTrade) amountToRisk = minTrade; 
-        if (amountToRisk > newWallet.quote) amountToRisk = newWallet.quote;
-
-        const custoTaxa = amountToRisk * taxaDecimal;
-        newWallet.quote -= amountToRisk;
-        newWallet.balances[symbol] = coinBalance + ((amountToRisk - custoTaxa) / currentPrice);
-        newWallet.entryPrices[symbol] = currentPrice;
-        highestPricesRef.current[symbol] = currentPrice;
-        
-        logMsg = `🟢 [COMPRA] ${formatMoney(amountToRisk)} em ${symbol} (Preço: ${formatMoney(currentPrice)})`;
-      } 
-      else if (signal === 'VENDER' && coinBalance > 0) {
-        let amountToSell = coinBalance;
-        if (symbol === bnbSymbol && bnbReserve > 0) {
-          amountToSell = coinBalance - bnbReserve;
-          if (amountToSell <= 0.00001) return prevWallet; 
-        }
-
-        const valorBruto = amountToSell * currentPrice;
-        const valorLiquido = valorBruto - (valorBruto * taxaDecimal);
-        const lucroPrejuizo = valorLiquido - (amountToSell * (newWallet.entryPrices[symbol] || currentPrice));
-
-        newWallet.quote += valorLiquido;
-        newWallet.balances[symbol] = coinBalance - amountToSell;
-        if (newWallet.balances[symbol] <= 0.00001) {
-          newWallet.balances[symbol] = 0;
-          delete newWallet.entryPrices[symbol];
-          delete highestPricesRef.current[symbol];
-        }
-        logMsg = `🔴 [VENDA] ${symbol} via ${motivo} (${formatMoney(currentPrice)}) | Res: ${lucroPrejuizo >= 0 ? '+' : ''}${formatMoney(lucroPrejuizo)}`;
-        tradeClosed = true;
-      }
-
-      if (logMsg) newWallet.logs = [logMsg, ...newWallet.logs].slice(0, 20);
-
-      if (tradeClosed) {
-        let tempTotal = newWallet.quote;
-        Object.entries(newWallet.balances).forEach(([s, a]) => { tempTotal += (a * (livePricesRef.current[s]?.close || 0)); });
-        setEquityHistory(prev => [...prev, { time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}), value: Number(tempTotal.toFixed(2)) }].slice(-20));
-      }
-      return newWallet;
-    });
-  };
-
+  // Carregar pares disponíveis
   useEffect(() => {
-    Object.entries(wallet.balances).forEach(([symbol, amount]) => {
-      if (amount <= 0) return;
-      const currentPrice = currentData[symbol]?.close;
-      const entryPrice = wallet.entryPrices?.[symbol];
-      if (!currentPrice || !entryPrice) return;
+    fetch('https://api.binance.com/api/v3/exchangeInfo')
+      .then(res => res.json())
+      .then(data => {
+        const pairs = data.symbols
+          .filter(s => s.quoteAsset === baseCurrency && s.status === 'TRADING')
+          .map(s => ({ value: s.symbol, label: `${s.baseAsset} (${s.symbol})` }));
+        pairs.sort((a, b) => a.label.localeCompare(b.label));
+        setAvailableCoins(pairs);
+      })
+      .catch(console.error);
+  }, [baseCurrency]);
 
-      if (!highestPricesRef.current[symbol] || currentPrice > highestPricesRef.current[symbol]) highestPricesRef.current[symbol] = currentPrice;
-      if ((((currentPrice - highestPricesRef.current[symbol]) / highestPricesRef.current[symbol]) * 100) <= -trailStop) handleBotAction(symbol, 'VENDER', 'TRAILING STOP');
-      else if ((((currentPrice - entryPrice) / entryPrice) * 100) >= takeProfit) handleBotAction(symbol, 'VENDER', 'TAKE PROFIT');
-    });
-  }, [currentData, trailStop, takeProfit, wallet.balances]);
-
-  const resetWallet = () => {
-    if(window.confirm("Zerar carteira e histórico?")) {
-      const startAmount = baseCurrency === 'BRL' ? 5000 : baseCurrency === 'USDT' ? 1000 : 5;
-      setWallet({ quote: startAmount, balances: {}, entryPrices: {}, logs: [] });
-      setEquityHistory([{ time: 'Início', value: startAmount }, { time: 'Agora', value: startAmount }]);
-      highestPricesRef.current = {}; lastSignalRef.current = {}; setReasonsLog({});
-    }
-  };
-
+  // Buscar histórico inicial de abertura para variações
   useEffect(() => {
-    if (selectedCoins.length === 0) return;
-    const ws = new WebSocket('ws://localhost:4000');
-    wsRef.current = ws;
-    ws.onopen = () => ws.send(JSON.stringify({ action: 'update_subscriptions', symbols: selectedCoins.map(c => c.value) }));
-    
-    ws.onmessage = (e) => {
-      const data = JSON.parse(e.data);
-      // 🟢 O Livro de Ofertas chega voando por aqui
-      if (data.action === 'book') {
-        setOrderBooks(prev => ({ ...prev, [data.symbol]: data.data }));
-      } 
-      // 🟢 As velas chegam por aqui
-      else if (data.action === 'kline') {
-        if (data.interval === '1m') setCurrentData(prev => ({ ...prev, [data.symbol]: data }));
-        else setHistoryOpen(prev => ({ ...prev, [`${data.symbol}_${data.interval}`]: data.open }));
-      }
-    };
-    return () => ws.close();
+    selectedCoins.forEach(coin => {
+      fetch(`http://localhost:4000/api/candles/${coin.value}`)
+        .then(res => res.json())
+        .then(data => {
+          if (data['1h'] && data['1h'].length > 0) {
+            setHistoryOpen(prev => ({ ...prev, [`${coin.value}_1h`]: parseFloat(data['1h'][data['1h'].length - 1].open) }));
+          }
+          if (data['1d'] && data['1d'].length > 0) {
+            setHistoryOpen(prev => ({ ...prev, [`${coin.value}_1d`]: parseFloat(data['1d'][data['1d'].length - 1].open) }));
+          }
+        }).catch(() => { });
+    });
   }, [selectedCoins]);
 
-  let totalPortfolioValue = wallet.quote;
-  Object.entries(wallet.balances).forEach(([s, a]) => { totalPortfolioValue += (a * (currentData[s]?.close || 0)); });
-  const startAmount = baseCurrency === 'BRL' ? 5000 : baseCurrency === 'USDT' ? 1000 : 5;
-  const pnlPct = ((totalPortfolioValue - startAmount) / startAmount) * 100;
-  const tradesFechados = wallet.logs.filter(l => l.includes('🔴'));
-  const winRate = tradesFechados.length > 0 ? (tradesFechados.filter(l => l.includes('Resultado: +')).length / tradesFechados.length) * 100 : 0;
+  // WebSocket com reconexão automática
+  useEffect(() => {
+    if (selectedCoins.length === 0) return;
 
-  const scrollListStyle = { marginTop: '10px', padding: '5px', maxHeight: '80px', overflowY: 'auto', fontSize: '0.72rem', borderTop: '1px solid #333', backgroundColor: '#161616', borderRadius: '4px' };
+    let reconnectAttempts = 0;
+    let reconnectTimeout;
+    let ws = null;
 
-  const getVar = (sym, tf) => {
+    const connect = () => {
+      ws = new WebSocket('ws://localhost:4000');
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        console.log('WebSocket conectado');
+        setWsReady(true);
+        reconnectAttempts = 0;
+        ws.send(JSON.stringify({ action: 'update_subscriptions', symbols: selectedCoins.map(c => c.value) }));
+      };
+
+      ws.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          if (data.action === 'book') {
+            setOrderBooks(prev => ({ ...prev, [data.symbol]: data.data }));
+          }
+          else if (data.action === 'kline') {
+            if (data.interval === '1m') setCurrentData(prev => ({ ...prev, [data.symbol]: data }));
+            else setHistoryOpen(prev => ({ ...prev, [`${data.symbol}_${data.interval}`]: data.open }));
+          }
+        } catch (err) {
+          console.error('Erro ao processar mensagem WebSocket:', err);
+        }
+      };
+
+      ws.onclose = () => {
+        console.log('WebSocket fechado, tentando reconectar...');
+        setWsReady(false);
+        const delay = Math.min(5000 * (reconnectAttempts + 1), 30000);
+        reconnectTimeout = setTimeout(connect, delay);
+        reconnectAttempts++;
+      };
+
+      ws.onerror = (err) => {
+        console.error('Erro no WebSocket:', err);
+        ws.close();
+      };
+    };
+
+    connect();
+
+    return () => {
+      if (ws) ws.close();
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+    };
+  }, [selectedCoins]);
+
+  // Cálculo de variação
+  const getVar = useCallback((sym, tf) => {
     const cur = currentData[sym]?.close;
     const op = tf === '1m' ? currentData[sym]?.open : historyOpen[`${sym}_${tf}`];
     return (cur && op) ? (((cur - op) / op) * 100).toFixed(2) : "0.00";
+  }, [currentData, historyOpen]);
+
+  // Handler para mudar moeda base
+  const handleBaseCurrencyChange = (e) => {
+    setBaseCurrency(e.target.value);
+    setSelectedCoins([]); setCurrentData({}); setHistoryOpen({}); setOrderBooks({});
+    // A carteira será reinicializada pelo hook na próxima renderização, pois baseCurrency mudou
+    // Mas o hook depende de baseCurrency, então ele vai resetar automaticamente? Não, precisamos forçar um reset.
+    // Vamos chamar resetWallet? Mas resetWallet pede confirmação. Melhor recarregar a página? 
+    // Ou podemos setar um estado que force o hook a reinicializar. A solução mais simples é recarregar a página.
+    // Por simplicidade, vamos recarregar a página para garantir que tudo reinicie.
+    window.location.reload();
   };
 
   return (
     <div style={{ padding: '20px', backgroundColor: '#121212', color: '#fff', minHeight: '100vh', fontFamily: 'sans-serif' }}>
-      
-      {/* 🟢 MODAL DE CONFIGURAÇÕES (HAMBURGER) */}
-      {isSettingsOpen && (
-        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.85)', zIndex: 9999, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-          <div style={{ backgroundColor: '#1e1e1e', padding: '30px', borderRadius: '12px', width: '90%', maxWidth: '800px', border: '1px solid #444', position: 'relative' }}>
-            <button onClick={() => setIsSettingsOpen(false)} style={{ position: 'absolute', top: '15px', right: '20px', background: 'transparent', border: 'none', color: '#fff', fontSize: '1.5rem', cursor: 'pointer' }}>✖</button>
-            <h2 style={{ margin: '0 0 20px 0', color: '#00d2ff' }}>⚙️ Configurações do Cockpit</h2>
-            
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '20px' }}>
-              {/* Financeiro */}
-              <div style={{ background: '#161616', padding: '15px', borderRadius: '8px', border: '1px solid #333' }}>
-                <h4 style={{ margin: '0 0 10px 0', color: '#888' }}>💰 Financeiro & Risco</h4>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                  <label style={{ fontSize: '0.8rem' }}>Taxa Corretora (%) <input type="number" value={fee} onChange={e => setFee(Number(e.target.value))} step="0.01" style={{ width: '100%', background: '#121212', border: '1px solid #444', color: '#fff', padding: '5px', marginTop: '5px' }} /></label>
-                  <label style={{ fontSize: '0.8rem' }}>Risco por Trade (%) <input type="number" value={riskPct} onChange={e => setRiskPct(Number(e.target.value))} style={{ width: '100%', background: '#121212', border: '1px solid #444', color: '#fff', padding: '5px', marginTop: '5px' }} /></label>
-                  <label style={{ fontSize: '0.8rem' }}>Trailing Stop (%) <input type="number" value={trailStop} onChange={e => setTrailStop(Number(e.target.value))} style={{ width: '100%', background: '#121212', border: '1px solid #444', color: '#fff', padding: '5px', marginTop: '5px' }} /></label>
-                  <label style={{ fontSize: '0.8rem' }}>Take Profit (%) <input type="number" value={takeProfit} onChange={e => setTakeProfit(Number(e.target.value))} style={{ width: '100%', background: '#121212', border: '1px solid #444', color: '#fff', padding: '5px', marginTop: '5px' }} /></label>
-                  <label style={{ fontSize: '0.8rem' }}>Reserva BNB (Qtd) <input type="number" value={bnbReserve} onChange={e => setBnbReserve(Number(e.target.value))} step="0.1" style={{ width: '100%', background: '#121212', border: '1px solid #444', color: '#fff', padding: '5px', marginTop: '5px' }} /></label>
-                </div>
-              </div>
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        settings={{
+          fee, riskPct, trailStop, takeProfit, bnbReserve, minVol, aiSettings,
+          setFee, setRiskPct, setTrailStop, setTakeProfit, setBnbReserve, setMinVol, setAiSettings
+        }}
+      />
 
-              {/* IA Engine */}
-              <div style={{ background: '#161616', padding: '15px', borderRadius: '8px', border: '1px solid #333' }}>
-                <h4 style={{ margin: '0 0 10px 0', color: '#888' }}>🧠 Motor de Inteligência Artificial</h4>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                  <label style={{ fontSize: '0.8rem', color: '#ff9900' }}>Volatilidade Mín. p/ Compra (%) <input type="number" value={minVol} onChange={e => setMinVol(Number(e.target.value))} step="0.05" style={{ width: '100%', background: '#121212', border: '1px solid #444', color: '#fff', padding: '5px', marginTop: '5px' }} /></label>
-                  <label style={{ fontSize: '0.8rem' }}>Tempo de Raciocínio (Seg) <input type="number" value={aiSettings.interval} onChange={e => setAiSettings({...aiSettings, interval: Number(e.target.value)})} step="5" min="10" style={{ width: '100%', background: '#121212', border: '1px solid #444', color: '#fff', padding: '5px', marginTop: '5px' }} /></label>
-                  <label style={{ fontSize: '0.8rem' }}>Agressividade (Peso Compra) <input type="number" value={aiSettings.agressivity} onChange={e => setAiSettings({...aiSettings, agressivity: Number(e.target.value)})} step="0.5" title="Valores acima de 1 forçam a IA a comprar mais" style={{ width: '100%', background: '#121212', border: '1px solid #444', color: '#fff', padding: '5px', marginTop: '5px' }} /></label>
-                  <label style={{ fontSize: '0.8rem' }}>Profundidade da Árvore (Depth) <input type="number" value={aiSettings.depth} onChange={e => setAiSettings({...aiSettings, depth: Number(e.target.value)})} step="1" max="10" style={{ width: '100%', background: '#121212', border: '1px solid #444', color: '#fff', padding: '5px', marginTop: '5px' }} /></label>
-                  <label style={{ fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '10px', marginTop: '10px' }}>
-                    <input type="checkbox" checked={aiSettings.useEma} onChange={e => setAiSettings({...aiSettings, useEma: e.target.checked})} />
-                    Trava de Inverno - Bloquear se menor EMA 200
-                  </label>
-                </div>
-              </div>
-            </div>
-            <button onClick={() => setIsSettingsOpen(false)} style={{ width: '100%', padding: '15px', marginTop: '20px', backgroundColor: '#00ff88', color: '#000', border: 'none', borderRadius: '8px', fontWeight: 'bold', fontSize: '1rem', cursor: 'pointer' }}>Salvar & Fechar</button>
-          </div>
-        </div>
-      )}
-
-      {/* HEADER LIMPO */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', backgroundColor: '#1e1e1e', padding: '15px 25px', borderRadius: '10px', border: '1px solid #333' }}>
+      {/* HEADER */}
+      <div style={{ display: 'flex', flexDirection: 'row', gap: '15px', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', backgroundColor: '#1e1e1e', padding: '15px 25px', borderRadius: '10px', border: '1px solid #333' }}>
         <h1 style={{ margin: 0, fontSize: '1.5rem', display: 'flex', alignItems: 'center', gap: '15px' }}>
           <button onClick={() => setIsSettingsOpen(true)} style={{ background: 'transparent', border: 'none', color: '#aaa', fontSize: '1.5rem', cursor: 'pointer', padding: 0 }} title="Configurações">⚙️</button>
           AI Crypto Terminal Pro
         </h1>
-        
+
         <div style={{ display: 'flex', gap: '15px', alignItems: 'center', flexWrap: 'wrap' }}>
-          <Select isMulti options={availableCoins} value={selectedCoins} onChange={setSelectedCoins} placeholder="Selecione as Moedas..." styles={{ control: (b) => ({ ...b, backgroundColor: '#121212', borderColor: '#444', minWidth: '300px'}), menu: (b) => ({ ...b, backgroundColor: '#1e1e1e', zIndex: 999 }), option: (b, s) => ({ ...b, backgroundColor: s.isFocused ? '#333' : '#1e1e1e', color: '#fff' }), multiValue: (b) => ({ ...b, backgroundColor: '#333' }), multiValueLabel: (b) => ({ ...b, color: '#fff' }) }} />
-          
+
           <select value={baseCurrency} onChange={handleBaseCurrencyChange} style={{ padding: '9px', backgroundColor: '#121212', color: '#fff', border: '1px solid #444', borderRadius: '5px', fontWeight: 'bold' }}>
             <option value="USDT">Par: USDT</option>
             <option value="BRL">Par: BRL</option>
@@ -316,124 +217,45 @@ export default function App() {
 
           <button onClick={resetWallet} style={{ backgroundColor: '#ff4444', color: '#fff', border: 'none', padding: '10px 15px', borderRadius: '5px', cursor: 'pointer', fontWeight: 'bold' }}>🔄 Reset</button>
         </div>
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '20px', marginBottom: '20px' }}>
-        <div style={{ backgroundColor: '#1e1e1e', padding: '15px 20px', borderRadius: '10px', border: '1px solid #333', height: '165px', display: 'flex', flexDirection: 'column', position: 'relative', overflow: 'hidden' }}>
-          <div style={{ position: 'relative', zIndex: 10 }}>
-            <span style={{ color: '#888', fontSize: '0.9rem' }}>Patrimônio Total</span>
-            <h2 style={{ margin: '2px 0' }}>{formatMoney(totalPortfolioValue)}</h2>
-            <span style={{ color: pnlPct >= 0 ? '#00ff88' : '#ff4444', fontWeight: 'bold', fontSize: '0.85rem' }}>PnL: {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%</span>
-          </div>
-          <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: '75px', zIndex: 1, opacity: 0.35 }}>
-            <ResponsiveContainer width="100%" height="100%"><LineChart data={equityHistory}><Line type="monotone" dataKey="value" stroke={pnlPct >= 0 ? "#00ff88" : "#ff4444"} strokeWidth={3} dot={false} isAnimationActive={true} /></LineChart></ResponsiveContainer>
-          </div>
-        </div>
-
-        <div style={{ backgroundColor: '#1e1e1e', padding: '20px', borderRadius: '10px', border: '1px solid #333', height: '165px', display: 'flex', flexDirection: 'column' }}>
-          <span style={{ color: '#888', fontSize: '0.9rem' }}>Estratégia Ativa</span>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '5px' }}>
-             <div style={{ color: '#00ff88', fontWeight: 'bold', fontSize: '0.85rem' }}>Win: {winRate.toFixed(1)}%</div>
-             <div style={{ fontSize: '0.75rem', color: '#666' }}>{tradesFechados.length} trades</div>
-          </div>
-          <div className="custom-scroll" style={scrollListStyle}>
-            {tradesFechados.length === 0 ? <div style={{ color: '#555', fontStyle: 'italic' }}>Aguardando...</div> : tradesFechados.map((trade, i) => (
-                <div key={i} style={{ padding: '3px 0', borderBottom: '1px solid #222', color: trade.includes('+') ? '#00ff88' : '#ff4444', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{trade.split('|')[0].replace('🔴 [VENDA] ', '')} | {trade.split('|')[1]}</div>
-            ))}
-          </div>
-        </div>
-
-        <div style={{ backgroundColor: '#1e1e1e', padding: '20px', borderRadius: '10px', border: '1px solid #333', height: '165px', display: 'flex', flexDirection: 'column' }}>
-          <span style={{ color: '#888', fontSize: '0.9rem' }}>Caixa Livre ({baseCurrency})</span>
-          <h2 style={{ margin: '5px 0' }}>{formatMoney(wallet.quote)}</h2>
-          <div className="custom-scroll" style={scrollListStyle}>
-            {Object.keys(wallet.balances).filter(c => wallet.balances[c] > 0).length === 0 ? <div style={{ color: '#555', fontStyle: 'italic' }}>Estoque Vazio.</div> : Object.entries(wallet.balances).map(([coin, amount]) => (
-                amount > 0 && <div key={coin} style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', borderBottom: '1px solid #222' }}><span style={{ color: '#ff9900', fontWeight: 'bold' }}>{coin.replace(baseCurrency, '')}</span><span style={{ color: '#aaa' }}>{amount.toFixed(6)}</span></div>
-            ))}
-          </div>
+        <div>
+          <Select isMulti options={availableCoins} value={selectedCoins} onChange={setSelectedCoins} placeholder="Selecione as Moedas..." styles={{ control: (b) => ({ ...b, backgroundColor: '#121212', borderColor: '#444', minWidth: '300px' }), menu: (b) => ({ ...b, backgroundColor: '#1e1e1e', zIndex: 999 }), option: (b, s) => ({ ...b, backgroundColor: s.isFocused ? '#333' : '#1e1e1e', color: '#fff' }), multiValue: (b) => ({ ...b, backgroundColor: '#333' }), multiValueLabel: (b) => ({ ...b, color: '#fff' }) }} />
         </div>
       </div>
+
+      <WalletPanel
+        formatMoney={formatMoney}
+        totalPortfolioValue={totalPortfolioValue}
+        pnlPct={pnlPct}
+        equityHistory={equityHistory}
+        winRate={winRate}
+        tradesFechados={tradesFechados}
+        wallet={wallet}
+        baseCurrency={baseCurrency}
+      />
 
       <div style={{ display: 'grid', gridTemplateColumns: showCharts ? '1fr 2.5fr' : '1fr 1.2fr', gap: '20px' }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-          <div style={{ backgroundColor: '#1e1e1e', padding: '20px', borderRadius: '10px', border: '1px solid #333' }}>
-            <h4 style={{ margin: '0 0 15px 0', color: '#888' }}>📝 Operações (20)</h4>
-            <div className="custom-scroll" style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '400px', overflowY: 'auto' }}>
-              {wallet.logs.length === 0 && <div style={{ color: '#555', fontSize: '0.8rem' }}>Aguardando...</div>}
-              {wallet.logs.map((log, i) => (
-                <div key={i} style={{ fontSize: '0.75rem', padding: '10px', borderRadius: '6px', backgroundColor: '#161616', borderLeft: `4px solid ${log.includes('🟢') ? '#00ff88' : '#ff4444'}`, color: '#eee' }}>{log}</div>
-              ))}
-            </div>
-          </div>
-          <div style={{ backgroundColor: '#1e1e1e', padding: '20px', borderRadius: '10px', border: '1px solid #333' }}>
-            <h4 style={{ margin: '0 0 15px 0', color: '#888' }}>🧠 Diário IA</h4>
-            <div className="custom-scroll" style={{ display: 'flex', flexDirection: 'column', gap: '10px', maxHeight: '300px', overflowY: 'auto' }}>
-              {Object.keys(reasonsLog).length === 0 && <div style={{ color: '#555', fontSize: '0.8rem' }}>Aguardando Cérebro...</div>}
-              {Object.entries(reasonsLog).filter(([sym]) => selectedCoins.some(c => c.value === sym)).map(([sym, data]) => (
-                <div key={sym} style={{ backgroundColor: '#161616', padding: '10px', borderRadius: '6px', border: '1px solid #2a2a2a' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '5px' }}><strong style={{ color: '#ff9900', fontSize: '0.8rem' }}>{sym}</strong><span style={{ fontSize: '0.75rem', color: '#666' }}>{data.time}</span></div>
-                  <div style={{ fontSize: '0.75rem', color: data.signal === 'COMPRAR' ? '#00ff88' : '#ff4444', fontWeight: 'bold' }}>➔ {data.signal}</div>
-                  <div style={{ fontSize: '0.7rem', color: '#aaa', fontStyle: 'italic', marginTop:'5px' }}>{data.reasons ? data.reasons.join(' | ') : '...'}</div>
-                </div>
-              ))}
-            </div>
-          </div>
+          <TradeLog logs={wallet.logs} />
+          <AIDiary reasonsLog={reasonsLog} selectedCoins={selectedCoins} />
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-          {selectedCoins.map(coin => {
-            const d = currentData[coin.value];
-            const book = orderBooks[coin.value]; // 🟢 Extrai do novo estado rápido
-            const v1m = getVar(coin.value, '1m');
-            const v1h = getVar(coin.value, '1h');
-            const v24h = getVar(coin.value, '1d');
-
-            return (
-              <div key={coin.value} style={{ backgroundColor: '#1e1e1e', padding: '20px', borderRadius: '10px', border: '1px solid #333' }}>
-                
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '10px' }}>
-                  <div>
-                    <h3 style={{ margin: 0, color: '#ff9900' }}>{coin.label}</h3>
-                    <div style={{ display: 'flex', gap: '10px', marginTop: '10px', fontSize: '0.75rem' }}>
-                      <span style={{ color: v1m >= 0 ? '#00ff88' : '#ff4444', backgroundColor: 'rgba(255,255,255,0.05)', padding: '4px 8px', borderRadius: '4px' }}>{v1m >= 0 ? '▲ subiu' : '▼ caiu'} {Math.abs(v1m)}%/min</span>
-                      <span style={{ color: v1h >= 0 ? '#00ff88' : '#ff4444', backgroundColor: 'rgba(255,255,255,0.05)', padding: '4px 8px', borderRadius: '4px' }}>{v1h >= 0 ? '▲ subiu' : '▼ caiu'} {Math.abs(v1h)}%/hora</span>
-                      <span style={{ color: v24h >= 0 ? '#00ff88' : '#ff4444', backgroundColor: 'rgba(255,255,255,0.05)', padding: '4px 8px', borderRadius: '4px' }}>{v24h >= 0 ? '▲ subiu' : '▼ caiu'} {Math.abs(v24h)}%/dia</span>
-                    </div>
-                  </div>
-                  <div style={{ textAlign: 'right' }}>
-                    <h3 style={{ margin: 0, color: d?.close >= d?.open ? '#00ff88' : '#ff4444', fontFamily: 'monospace' }}>{d ? formatMoney(d.close) : '...'}</h3>
-                  </div>
-                </div>
-                
-                {/* 🟢 PASSANDO AS CONFIGURAÇÕES DA IA PARA O COMPONENTE */}
-                <AIPrediction symbol={coin.value} onUpdate={handleAiUpdate} aiSettings={aiSettings} />
-                
-                <div style={{ display: 'flex', gap: '15px', marginTop: '15px', borderTop: '1px solid #2a2a2a', paddingTop: '15px' }}>
-                  {showCharts && <div style={{ flex: 3 }}><Chart symbol={coin.value} liveData={d} /></div>}
-                  
-                  {/* 🟢 LIVRO DE OFERTAS AGORA PULSA INDEPENDENTE */}
-                  <div style={{ flex: 1, backgroundColor: '#161616', padding: '10px', borderRadius: '8px', border: '1px solid #333', minWidth: '180px' }}>
-                    <h4 style={{ margin: '0 0 10px 0', color: '#888', fontSize: '0.8rem', textAlign: 'center' }}>📖 Livro de Ofertas</h4>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '0.75rem', fontFamily: 'monospace' }}>
-                      <div style={{ backgroundColor: 'rgba(255,68,68,0.1)', padding: '8px', borderRadius: '4px', borderLeft: '2px solid #ff4444' }}>
-                        <span style={{ color: '#aaa' }}>Venda (Ask)</span><br/>
-                        <strong style={{ color: '#ff4444', fontSize: '0.9rem' }}>{book?.askPrice ? formatMoney(book.askPrice) : '...'}</strong><br/>
-                        <span style={{ color: '#888' }}>Vol: {book?.askQty?.toFixed(2) || '...'}</span>
-                      </div>
-                      <div style={{ textAlign: 'center', color: '#555', fontSize: '0.6rem' }}>SPREAD</div>
-                      <div style={{ backgroundColor: 'rgba(0,255,136,0.1)', padding: '8px', borderRadius: '4px', borderLeft: '2px solid #00ff88' }}>
-                        <span style={{ color: '#aaa' }}>Compra (Bid)</span><br/>
-                        <strong style={{ color: '#00ff88', fontSize: '0.9rem' }}>{book?.bidPrice ? formatMoney(book.bidPrice) : '...'}</strong><br/>
-                        <span style={{ color: '#888' }}>Vol: {book?.bidQty?.toFixed(2) || '...'}</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-            </div>
-          )})}
+          {selectedCoins.map(coin => (
+            <CoinCard
+              key={coin.value}
+              coin={coin}
+              currentData={currentData}
+              orderBooks={orderBooks}
+              getVar={getVar}
+              formatMoney={formatMoney}
+              showCharts={showCharts}
+              onAiUpdate={handleAiUpdate}
+              aiSettings={aiSettings}
+            />
+          ))}
         </div>
       </div>
+
       <style>{`
         .custom-scroll::-webkit-scrollbar { width: 4px; }
         .custom-scroll::-webkit-scrollbar-track { background: #121212; }
